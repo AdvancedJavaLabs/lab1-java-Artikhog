@@ -2,7 +2,6 @@ package org.itmo;
 
 import org.openjdk.jcstress.annotations.*;
 import org.openjdk.jcstress.infra.results.I_Result;
-import org.openjdk.jcstress.infra.results.ZZ_Result;
 
 @JCStressTest
 @Outcome(id = "1023", expect = Expect.ACCEPTABLE, desc = "Correct")

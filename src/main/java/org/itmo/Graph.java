@@ -3,17 +3,17 @@ package org.itmo;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicReference;
 
 class Graph {
     private final int V;
     private final ArrayList<Integer>[] adjList;
-    private final int threadPoolSize;
+    private int threadPoolSize;
     private AtomicIntegerArray visited;
 
     Graph(int vertices) {
         this(vertices, Runtime.getRuntime().availableProcessors());
     }
-
 
     Graph(int vertices, int threadPoolSize) {
         this.V = vertices;
@@ -40,21 +40,32 @@ class Graph {
         currentLevelQueue.add(startVertex);
 
         ExecutorService executor = Executors.newFixedThreadPool(threadPoolSize);
-        CyclicBarrier levelBarrier = new CyclicBarrier(threadPoolSize);
 
         try {
             int level = 0;
 
             while (!currentLevelQueue.isEmpty()) {
-//                System.out.println("Processing level " + level +
-//                        ", verteces: " + currentLevelQueue.size());
-
-                // Запускаем воркеров для текущего уровня
+                System.out.println("Processing level " + level + ", verteces: " + currentLevelQueue.size());
+                // футуры текущего уровня
                 List<Future<?>> futures = new ArrayList<>();
+                // запускаем на каждый поток задание на посещение вершин пока очередь не опустеет
                 for (int i = 0; i < threadPoolSize; i++) {
-                    futures.add(executor.submit(createLevelWorker(
-                            currentLevelQueue, nextLevelQueue, visited, levelBarrier
-                    )));
+                    ConcurrentLinkedQueue<Integer> finalCurrentLevelQueue = currentLevelQueue;
+                    ConcurrentLinkedQueue<Integer> finalNextLevelQueue = nextLevelQueue;
+                    futures.add(executor.submit(() -> {
+                        try {
+                            Integer vertex;
+                            while ((vertex = finalCurrentLevelQueue.poll()) != null) {
+                                for (int neighbor : adjList[vertex]) {
+                                    if (visited.compareAndSet(neighbor, 0, 1)) {
+                                        finalNextLevelQueue.add(neighbor);
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }));
                 }
 
                 // Ждем завершения уровня
@@ -62,7 +73,7 @@ class Graph {
                     future.get();
                 }
 
-                // Подготовка к следующему уровню
+                // Меняем очереди местами
                 currentLevelQueue = nextLevelQueue;
                 nextLevelQueue = new ConcurrentLinkedQueue<>();
                 level++;
@@ -74,26 +85,48 @@ class Graph {
         }
     }
 
-    private Runnable createLevelWorker(ConcurrentLinkedQueue<Integer> currentQueue,
-                                       ConcurrentLinkedQueue<Integer> nextQueue,
-                                       AtomicIntegerArray visited,
-                                       CyclicBarrier barrier) {
-        return () -> {
-            try {
-                Integer vertex;
-                while ((vertex = currentQueue.poll()) != null) {
-                    for (int neighbor : adjList[vertex]) {
-                        if (visited.compareAndSet(neighbor, 0, 1)) {
-                            nextQueue.add(neighbor);
+    void parallelBFSCyclicBarrier(int startVertex) {
+        this.visited = new AtomicIntegerArray(V);
+        AtomicReference<ConcurrentLinkedQueue<Integer>> currentLevelQueue = new AtomicReference<>(new ConcurrentLinkedQueue<>());
+        AtomicReference<ConcurrentLinkedQueue<Integer>> nextLevelQueue = new AtomicReference<>(new ConcurrentLinkedQueue<>());
+
+        visited.set(startVertex, 1);
+        currentLevelQueue.get().add(startVertex);
+
+        ExecutorService executor = Executors.newFixedThreadPool(threadPoolSize);
+        // Синхронизация на барьере при достижении барьера меняем местами очереди
+        CyclicBarrier levelBarrier = new CyclicBarrier(threadPoolSize, () -> {
+            currentLevelQueue.set(nextLevelQueue.get());
+            nextLevelQueue.set(new ConcurrentLinkedQueue<>());
+        });
+
+        try {
+            while (!currentLevelQueue.get().isEmpty()) {
+                // запускаем на каждый поток задание на посещение вершин пока очередь не опустеет
+                for (int i = 0; i < threadPoolSize; i++) {
+                    ConcurrentLinkedQueue<Integer> finalCurrentLevelQueue = currentLevelQueue.get();
+                    ConcurrentLinkedQueue<Integer> finalNextLevelQueue = nextLevelQueue.get();
+                    executor.submit(() -> {
+                        try {
+                            Integer vertex;
+                            while ((vertex = finalCurrentLevelQueue.poll()) != null) {
+                                for (int neighbor : adjList[vertex]) {
+                                    if (visited.compareAndSet(neighbor, 0, 1)) {
+                                        finalNextLevelQueue.add(neighbor);
+                                    }
+                                }
+                            }
+                            // синхронизация на барьере
+                            levelBarrier.await();
+                        } catch (Exception e) {
+                            Thread.currentThread().interrupt();
                         }
-                    }
+                    });
                 }
-                // Синхронизация на барьере
-                barrier.await();
-            } catch (Exception e) {
-                Thread.currentThread().interrupt();
             }
-        };
+        } finally {
+            executor.shutdown();
+        }
     }
 
     //Generated by ChatGPT
@@ -117,21 +150,20 @@ class Graph {
         }
     }
 
+    // генерирует дерево с заданным ветвлением
     void generateTree(int branchingFactor) {
-        // Очищаем граф
         for (int i = 0; i < V; i++) {
             adjList[i].clear();
         }
 
         Queue<Integer> queue = new LinkedList<>();
-        int nextVertex = 1; // Следующая вершина для добавления (0 уже корень)
+        int nextVertex = 1;
 
-        queue.add(0); // Начинаем с корня
+        queue.add(0); // корень 0
 
         while (!queue.isEmpty() && nextVertex < V) {
             int current = queue.poll();
-
-            // Добавляем до branchingFactor детей к текущей вершине
+            // генерируем детей по количеству branchFactor
             for (int i = 0; i < branchingFactor && nextVertex < V; i++) {
                 addEdge(current, nextVertex);
                 queue.add(nextVertex);
@@ -139,11 +171,8 @@ class Graph {
             }
         }
     }
-
+    // вывод для визуализации в GraphViz
     void visualizeAsGraphViz() {
-        System.out.println("Граф в формате GraphViz:");
-        System.out.println("========================");
-
         for (int i = 0; i < V; i++) {
             if (!adjList[i].isEmpty()) {
                 for (int neighbor : adjList[i]) {
@@ -151,6 +180,10 @@ class Graph {
                 }
             }
         }
+    }
+
+    void setThreadPoolSize(int threadPoolSize) {
+        this.threadPoolSize = threadPoolSize;
     }
 
     public boolean isVisited(int vertex) {
@@ -161,8 +194,27 @@ class Graph {
         int count = 0;
         for (int i = 0; i < V; i++) {
             if (visited.get(i) == 1) count++;
-            if (visited.get(i) != 1) System.out.println("Vertex" + i + " not visited");
         }
         return count;
+    }
+
+    public int getDuplicatedVisitsCount() {
+        int duplicatedVisitsCount = 0;
+        for (int i = 0; i < V; i++) {
+            if (visited.get(i) > 1) {
+                duplicatedVisitsCount++;
+            }
+        }
+        return duplicatedVisitsCount;
+    }
+
+    public int getNotVisitedCount() {
+        int notVisitedCount = 0;
+        for (int i = 0; i < V; i++) {
+            if (visited.get(i) == 0) {
+                notVisitedCount++;
+            }
+        }
+        return notVisitedCount;
     }
 }
